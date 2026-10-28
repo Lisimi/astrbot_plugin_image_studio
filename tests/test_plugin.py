@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock
 import pytest
 from starlette.responses import JSONResponse, Response
 
+from astrbot_plugin_image_studio.comfy import ComfyUnavailable
 from astrbot_plugin_image_studio.models import Portrait, Settings
 from astrbot_plugin_image_studio.store import Store, revision
 
@@ -50,6 +51,7 @@ def plugin(monkeypatch, tmp_path):
     modules["astrbot.api.web"].file_response = lambda *args,**kwargs: Response()
     monkeypatch.delitem(sys.modules, "astrbot_plugin_image_studio.main", raising=False)
     main = importlib.import_module("astrbot_plugin_image_studio.main")
+    monkeypatch.setattr(main.ComfyClient, "check_connection", AsyncMock(return_value=True))
     persona_manager = SimpleNamespace(get_persona=AsyncMock(return_value=SimpleNamespace(system_prompt="gentle artist")),
         resolve_selected_persona=AsyncMock(return_value=("alice", {"prompt":"gentle artist"}, None, False)))
     context = SimpleNamespace(register_web_api=lambda *args:None, persona_manager=persona_manager,
@@ -154,3 +156,40 @@ async def test_confirm_uses_exact_preview_without_second_llm_call(plugin):
     assert instance.context.llm_generate.await_count == 1
     request.json.return_value["idea"] = "changed scene"
     assert (await instance.web("generate")).status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_tool_instructs_model_to_report_offline_failure(plugin):
+    import json
+    instance, _ = plugin
+    instance.accept = AsyncMock(side_effect=ComfyUnavailable())
+    result = json.loads(await instance.image_generate(object(), "garden"))
+    assert result["ok"] is False
+    assert result["reason"] == "comfy_unavailable"
+    assert "本次未生成图片" in result["message"]
+    assert "不要声称正在生成" in result["instruction"]
+
+
+@pytest.mark.asyncio
+async def test_preview_unavailable_returns_503_without_calling_llm(plugin, monkeypatch):
+    import json
+    from astrbot_plugin_image_studio.comfy import ComfyClient
+    instance, request = plugin
+    persona = "gentle artist"
+    instance.store.save_portrait(Portrait("alice", appearance="blue eyes", style="ink", persona_hash=hashlib.sha256(persona.encode()).hexdigest()))
+    monkeypatch.setattr(ComfyClient,"check_connection",AsyncMock(side_effect=ComfyUnavailable()))
+    request.json.return_value = {"persona_id":"alice","idea":"garden"}
+    response = await instance.web("preview")
+    assert response.status_code == 503
+    assert "本次未生成图片" in json.loads(response.body)["message"]
+    instance.context.llm_generate.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_command_reports_connection_failure_in_user_reply(plugin):
+    instance, _ = plugin
+    instance.accept = AsyncMock(side_effect=ComfyUnavailable())
+    event = SimpleNamespace(plain_result=lambda text:text)
+    replies = [reply async for reply in instance.draw(event,"garden")]
+    assert len(replies) == 1
+    assert "暂时无法连接本地 ComfyUI" in replies[0]

@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from PIL import Image
 
-from astrbot_plugin_image_studio.comfy import ComfyClient, SubmissionRejected
+from astrbot_plugin_image_studio.comfy import ComfyClient, ComfyError, ComfyUnavailable, SubmissionRejected
 from astrbot_plugin_image_studio.engine import Engine
 from astrbot_plugin_image_studio.models import Portrait, Settings, object_value
 from astrbot_plugin_image_studio.store import Store
@@ -110,13 +110,57 @@ async def test_busy_comfy_never_calls_llm_and_does_not_start_cooldown(store, por
     prepare = AsyncMock(return_value="scene")
     client = AsyncMock()
     client.idle.return_value = False
+    client.check_connection.return_value = False
     engine = Engine(store, AsyncMock())
     with patch("astrbot_plugin_image_studio.engine.ComfyClient", return_value=client):
-        await engine.start(Settings(), portrait, prepare)
-        await engine.worker
+        with pytest.raises(ValueError, match="已有其他任务"):
+            await engine.start(Settings(), portrait, prepare)
     prepare.assert_not_awaited()
     client.submit.assert_not_awaited()
     assert engine.state()["cooldown_until"] == 0
+
+
+@pytest.mark.asyncio
+async def test_offline_rejected_before_job_and_llm(store, portrait):
+    prepare = AsyncMock(return_value="scene")
+    client = AsyncMock()
+    client.check_connection.side_effect = ComfyUnavailable()
+    engine = Engine(store, AsyncMock())
+    with patch("astrbot_plugin_image_studio.engine.ComfyClient", return_value=client):
+        with pytest.raises(ComfyUnavailable, match="本次未生成图片"):
+            await engine.start(Settings(), portrait, prepare)
+    prepare.assert_not_awaited()
+    client.submit.assert_not_awaited()
+    assert engine.worker is None
+    assert engine.state() == {"active": None, "cooldown_until": 0}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error", [OSError("offline"), TimeoutError(), ComfyError("HTTP 503"), ValueError("not JSON")])
+async def test_connection_failure_has_safe_user_message(error):
+    client = ComfyClient("http://test")
+    client.idle = AsyncMock(side_effect=error)
+    with pytest.raises(ComfyUnavailable, match="网络连接"):
+        await client.check_connection()
+
+
+@pytest.mark.asyncio
+async def test_disconnect_before_submission_notifies_chat(store, portrait):
+    prepare = AsyncMock()
+    deliver = AsyncMock()
+    client = AsyncMock()
+    client.check_connection.return_value = True
+    client.idle.side_effect = OSError("disconnected after acceptance")
+    engine = Engine(store, deliver)
+    with patch("astrbot_plugin_image_studio.engine.ComfyClient", return_value=client):
+        await engine.start(Settings(), portrait, prepare, "qq:friend:1")
+        await engine.worker
+    prepare.assert_not_awaited()
+    client.submit.assert_not_awaited()
+    deliver.assert_awaited_once()
+    job = deliver.call_args.args[0]
+    assert job["stage"] == "failed"
+    assert "本次未生成图片" in job["error"]
 
 
 @pytest.mark.asyncio
@@ -130,6 +174,8 @@ async def test_submission_timeout_is_not_retried(store, portrait):
         await engine.worker
         active = object_value(engine.state()["active"])
         assert active["stage"] == "unknown" and active["prompt_id"]
+        assert "无法确认任务结果" in active["error"]
+        assert "本次未生成图片" not in active["error"]
         with pytest.raises(ValueError):
             await engine.start(Settings(), portrait, AsyncMock())
         assert client.submit.await_count == 1

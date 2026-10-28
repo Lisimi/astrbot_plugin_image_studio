@@ -24,7 +24,7 @@ from astrbot.core.message.message_event_result import MessageChain
 from astrbot.core.provider.entities import ProviderRequest
 from astrbot.core.star.filter.command import GreedyStr
 
-from .comfy import ComfyClient
+from .comfy import ComfyClient, ComfyUnavailable
 from .engine import Engine
 from .models import Object, Portrait, Settings, object_value, parse_object, string
 from .store import Store, revision
@@ -103,6 +103,7 @@ class ImageStudio(Star):
 
     async def prompt(self, settings: Settings, portrait: Portrait, persona: str, idea: str, origin: str = "", chat: str = "") -> str:
         self.validate_portrait(portrait, persona)
+        await ComfyClient(settings.comfy_url).check_connection()
         result = await self.ask(await self.provider(settings, origin), PROMPT_RULE,
                                 {"persona": persona, "appearance": portrait.appearance,
                                  "style": portrait.style, "habits": portrait.habits,
@@ -167,6 +168,9 @@ class ImageStudio(Star):
         """
         try:
             return await self.accept(event, prompt, True)
+        except ComfyUnavailable as error:
+            return json.dumps({"ok": False, "reason": "comfy_unavailable", "message": str(error),
+                "instruction": "明确告知用户本次生图失败；不要声称正在生成或已经生成，不要本轮重复调用。连接恢复后由用户重新发起。"}, ensure_ascii=False)
         except ValueError as error:
             return str(error)
 
@@ -177,7 +181,7 @@ class ImageStudio(Star):
             portrait = self.store.portrait(persona_id)
             self.validate_portrait(portrait, persona)
             if portrait.auto:
-                req.system_prompt = (req.system_prompt or "") + "\n[生图工具规则] " + self.settings().auto_rules + " 需要时调用 image_generate；工具已负责发送图片。忙碌或冷却时不要重复调用。"
+                req.system_prompt = (req.system_prompt or "") + "\n[生图工具规则] " + self.settings().auto_rules + " 需要时调用 image_generate；工具负责发送图片。仅在工具返回已受理时告知用户正在生成；失败时说明失败原因，不要假称已生成。连接失败、忙碌或冷却时不要本轮重复调用。"
         except ValueError:
             return
 
@@ -292,6 +296,8 @@ class ImageStudio(Star):
                     job_id = await self.engine.start(settings, portrait, prepare)
                 return json_response({"id": job_id})
             return error_response("未知接口", status_code=404)
+        except ComfyUnavailable as error:
+            return error_response(str(error), status_code=503)
         except (ValueError, FileNotFoundError) as error:
             return error_response(str(error), status_code=400)
         except Exception:

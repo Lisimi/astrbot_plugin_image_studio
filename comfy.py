@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 
@@ -16,6 +17,11 @@ class ComfyError(RuntimeError):
 
 class SubmissionRejected(ComfyError):
     pass
+
+
+class ComfyUnavailable(ValueError):
+    def __init__(self) -> None:
+        super().__init__("暂时无法连接本地 ComfyUI，本次未生成图片。请确认生图电脑和 ComfyUI 已启动，并检查 NAS 到 ComfyUI 的网络连接。")
 
 
 async def read_limited(response: aiohttp.ClientResponse, limit: int) -> bytes:
@@ -53,6 +59,13 @@ class ComfyClient:
         if not isinstance(queue.get("queue_running"), list) or not isinstance(queue.get("queue_pending"), list):
             raise ComfyError("ComfyUI 队列格式异常")
         return not queue["queue_running"] and not queue["queue_pending"]
+
+    async def check_connection(self) -> bool:
+        """Validate the live queue API before accepting work or calling an LLM."""
+        try:
+            return await asyncio.wait_for(self.idle(), timeout=5)
+        except (aiohttp.ClientError, OSError, TimeoutError, ComfyError, ValueError) as error:
+            raise ComfyUnavailable() from error
 
     async def upload(self, path: Path) -> str:
         form = aiohttp.FormData()

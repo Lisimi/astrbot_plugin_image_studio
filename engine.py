@@ -9,7 +9,9 @@ import uuid
 from collections.abc import Awaitable, Callable
 from typing import TypeVar
 
-from .comfy import ComfyClient, SubmissionRejected
+from aiohttp import ClientError
+
+from .comfy import ComfyClient, ComfyError, ComfyUnavailable, SubmissionRejected
 from .models import Object, Portrait, Settings, object_value, string
 from .store import Store
 from .workflow import build_workflow
@@ -62,6 +64,8 @@ class Engine:
             self.store.path("portraits", portrait.image)
         async with self.gate:
             state = self.check()
+            if not await ComfyClient(settings.comfy_url).check_connection():
+                raise ValueError("ComfyUI 已有其他任务，本次没有提交")
             job: Object = {"id": str(uuid.uuid4()), "stage": "preparing", "started": time.time(),
                            "persona_id": portrait.persona_id, "origin": origin,
                            "settings": settings.to_dict(), "portrait": portrait.to_dict(),
@@ -137,6 +141,11 @@ class Engine:
             self.update(job, stage="unknown", error="等待超时，已保留任务 ID；请查询原任务，勿重复提交")
         except SubmissionRejected as error:
             self.finish(job, "failed", str(error))
+        except (ClientError, OSError, TimeoutError, ComfyError, ComfyUnavailable):
+            if job.get("prompt_id"):
+                self.update(job, stage="unknown", error="ComfyUI 连接中断或响应异常，无法确认任务结果；原任务可能仍在运行，请恢复查询，不要重复生图。")
+            else:
+                self.finish(job, "failed", str(ComfyUnavailable()))
         except asyncio.CancelledError:
             if job.get("stage") == "sending":
                 self.finish(job, "send_unknown", "发送结果未知，图片已保存，请从记录查看")
