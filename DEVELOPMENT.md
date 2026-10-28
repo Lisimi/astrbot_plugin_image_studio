@@ -4,7 +4,7 @@
 
 ## 1. 范围与兼容基线
 
-插件运行于 NAS 的 AstrBot，调用用户本机的 ComfyUI。当前仅实现固定 Anima 文生图/参考图重绘；通用工作流上传和节点映射属于后续功能。
+插件运行于 NAS 的 AstrBot，调用用户本机的 ComfyUI。支持本地 ComfyUI 的 API 工作流发现、导入、显式节点映射与动态参数，保留内置 Anima 文生图/参考图重绘作为兼容入口。
 
 已确认 Dashboard 显示 AstrBot `4.28.2`，本机 ComfyUI 为 `0.30.2`。后端使用 `astrbot.api.web`、`context.llm_generate`、`persona_manager.resolve_selected_persona` 等接口，NAS 实际加载与完整链路仍需验收。`metadata.yaml` 的最低版本声明不是对所有中间发行版的验证承诺。
 
@@ -17,11 +17,12 @@ AstrBot `4.28.2` 只扫描 `pages/<页面名>/index.html`，桥接对象为 `Ast
 | `main.py` | AstrBot 生命周期、指令、LLM 工具、人格解析、提示词调用与管理 API |
 | `models.py` | 配置和画像的数据结构、字段与数值验证 |
 | `engine.py` | 全局互斥、后台任务、恢复查询、发送状态与冷却 |
-| `comfy.py` | ComfyUI 上传、提交、轮询、定位任务与有大小限制的分块下载 |
-| `workflow.py` | 运行时构建 Anima API 工作流 |
+| `comfy.py` | ComfyUI 工作流列表/读取、节点定义、上传、提交、轮询及有大小限制的下载 |
+| `workflow.py` | 兼容旧配置的内置 Anima 构建器 |
+| `workflow_config.py` | API 格式识别、输入元数据、图依赖裁剪、映射与覆盖校验、种子范围及图渲染 |
 | `workflows/anima_api.json` | 当前文生图 API 示例，不是运行时加载的工作流文件 |
 | `store.py` | 原子 JSON 写入、画像与结果图片校验和历史记录 |
-| `pages/studio/` | 五个页签共用的 HTML、CSS 和前端逻辑 |
+| `pages/studio/` | 双设置区域、试生成和记录的 HTML、CSS 和前端逻辑 |
 | `_conf_schema.json` | AstrBot 配置定义，默认值须与 `Settings` 一致 |
 | `metadata.yaml` | 插件元信息与版本 |
 | `tests/` | 后端、HTTP 分块响应、SDK 替身和前端交互测试 |
@@ -31,13 +32,13 @@ AstrBot `4.28.2` 只扫描 `pages/<页面名>/index.html`，桥接对象为 `Ast
 
 1. 手动指令或工具调用使用 AstrBot 的统一人格解析器，解析会话规则、当前对话与默认人格。明确取消人格时不借用其他画像。
 2. 读取对应画像，核对人格内容哈希。人格变化后要求管理员重新确认画像。
-3. `Engine.start` 在互斥区内检查活动任务和冷却，以最长 5 秒查询真实 ComfyUI 队列。连接失败时直接拒绝，已有其他任务时提示忙碌；两者均不创建任务或新冷却。检查通过后才持久化任务并交给后台处理。
+3. `Engine.start` 在互斥区内检查活动任务和冷却，以最长 5 秒查询真实 ComfyUI 队列。连接失败时直接拒绝，已有其他任务时提示忙碌；两者均不创建任务或新冷却。自定义工作流还须校验地址与实时节点定义，缺少模型/映射则拒绝；检查通过才持久化包括完整工作流在内的快照并后台处理。
 4. LLM 根据人格、档案、画面需求和当前消息生成动态画面描述；插件组合固定外观和画风。内部请求不提供生图工具，避免递归。
-5. 图生图模式先上传画像，构建 API 图；再次检查队列后提交一次，持久化任务 ID。
+5. 内置图生图或自定义图有参考图映射时上传当前人格画像。仅替换映射/覆盖输入，裁剪到所选输出依赖链；再次检查队列后提交一次，持久化任务 ID。
 6. 轮询原任务并下载保存图片。聊天任务发送至原会话；网页任务在生成记录中查看。
 7. 结束后保存历史并进入冷却。异常状态保留原任务，恢复时查询，不盲目重新提交。
 
-网页画像解析和提示词预览也使用互斥入口。预览生成的提示词通过短期 token 确认；人格、画像、设置或画面需求变化后失效，避免确认时使用另一份提示词。
+网页画像解析和提示词预览也使用互斥入口。预览生成的提示词通过短期 token 确认；人格、画像、设置、工作流或画面需求变化后失效，避免确认时使用另一份提示词。
 
 `ComfyClient.check_connection` 将网络错误、超时、HTTP 失败及不合法响应转换为可直接反馈的 `ComfyUnavailable`。提示词调用前再次检查连接，覆盖预览和受理后断线的情况。手动指令返回明确的中文失败信息，LLM 工具返回 `ok=false`、`reason=comfy_unavailable` 及回复指导，网页返回 HTTP 503。正常聊天仍可进行；离线不自动切换生图方式。
 
@@ -52,7 +53,10 @@ AstrBot `4.28.2` 只扫描 `pages/<页面名>/index.html`，桥接对象为 `Ast
 | `GET state` | 配置及版本指纹、人格和提供商列表、画像、任务与历史 |
 | `GET thumbnail` / `download` | 安全目录内的缩略图和文件下载 |
 | `POST settings` | 校验配置及并发版本，保存至 AstrBot 配置 |
-| `POST connection` | 查询 ComfyUI `/system_stats`，不提交生成 |
+| `POST connection` | 验证当前填写地址的队列 API，再查询 `/system_stats`，不生成 |
+| `POST workflows` | 连接检查后列出 `workflows/` 下的 JSON |
+| `POST workflow-inspect` | 读取列表中的 API 文件或导入对象，返回图、版本指纹、输入字段与建议映射；不保存 |
+| `POST workflow-save` | 根据实时节点定义校验图、映射及覆盖，并核对 workflow revision；空对象切回内置图 |
 | `POST upload` | 上传参考图，返回服务器生成的文件名 |
 | `POST portrait` | 保存与确认指定人格画像 |
 | `POST analyze` | 使用已配置的视觉模型解析例图 |
@@ -62,13 +66,17 @@ AstrBot `4.28.2` 只扫描 `pages/<页面名>/index.html`，桥接对象为 `Ast
 
 前端状态刷新不得覆盖用户正在编辑的表单，也不能将轮询返回的新配置指纹用于提交旧表单。错误信息与模型输出按文本呈现。
 
-页面配置有模型、尺寸与采样参数；这不表示可读取 ComfyUI 编辑器中的当前工作流。修改页面字段时同步维护 schema、数据结构、验证、文档和相关测试。
+页面分为 ComfyUI 设置与人格画像设置。前者管理地址、全局限制和图；后者管理共享 LLM/规则及每个人格的独立档案。自定义图的动态字段不加入 AstrBot `_conf_schema.json`；原字段保持兼容。文件必须保存到 ComfyUI 用户目录，不读取编辑器未保存状态。
 
 ## 5. 工作流与存储约束
 
-运行时图保留 Anima 模型与采样链，正面文本输入节点 218，负面输入节点 214，输出节点固定为 222。原始前端工作流中的反推、TIPO 与透传节点不参与提交。
+没有 `workflow.json` 或内容为空时使用原 Anima 构建器，节点 218/214/222 保持兼容。自定义图保留用户原图，只替换显式映射的正面/负面、种子、参考图和强度，以及勾选的字面量覆盖。图复制后按指定 SaveImage/PreviewImage 输出递归裁剪依赖，不执行无关输出节点；映射不在依赖链上则拒绝。
 
-文生图使用空 latent；参考图重绘使用 LoadImage → 居中裁剪缩放 → VAEEncode。原图姿势与构图可能保留；当前不具有专门的角色身份锁定节点。
+内置模式的文生图使用空 latent，参考图重绘使用 LoadImage → 缩放 → VAEEncode。自定义流程的模式由原图开关和参数决定，不会因人格旧 mode 字段自动改图；映射 image 时总是上传该人格参考图，映射 denoise 时注入其强度。原图姿势/构图是否保留及身份一致性由节点能力决定。
+
+输入定义逐 class 请求 `/object_info/{编码类型名}`，并发上限 4、总等待 30 秒。支持旧枚举数组与新 COMBO/options，连接类型兼容通用 `*` 与 ComfyUI 的 `COMFY_MATCHTYPE_V3`。普通覆盖不允许连线；明确的提示词/种子等映射允许替换相应连线。校验节点存在、必填字段、连接序号/类型、数值/枚举、映射冲突与死节点，拒绝远程 `api_node`。任意自定义字面量、子图及远程服务不在承诺范围。
+
+API 图限制 1 MB、500 节点。种子按实时 INT 范围生成，至多 2^50-1，避免窄范围 seed 被随机大整数破坏。参数表按节点折叠，只有用户勾选的可见字段持久化覆盖；原默认值与连接保留。
 
 ComfyUI 队列检查不能阻止用户稍后手动提交任务；本插件只约束自己的入口，不取消、清空或重排其他任务。
 
@@ -77,9 +85,10 @@ ComfyUI 队列检查不能阻止用户稍后手动提交任务；本插件只约
 - `portraits.json` / `portraits/`：人格画像档案及图片。
 - `state.json`：活动任务、配置快照与冷却截止时间。
 - `history.json` / `outputs/`：最近 200 条任务记录与输出图片；输出文件暂不自动清理。
-- `preview.json`：最近一次提示词预览及有效性信息。
+- `preview.json`：最近一次提示词预览及有效性信息，包含 workflow revision。
+- `workflow.json`：`name/source/url/graph/mapping/overrides/negative/fingerprint`，自定义图完整快照；与 AstrBot 配置分开保存。保存有独立 revision 并发检查，重新加载同名来源保留映射，失效字段提示用户修复。旧任务没有 workflow 字段时仍从输出 222 恢复。
 
-上传限制为 20 MB、2400 万像素；输出请求限制为 160 万像素。HTTP 响应按块读取至 EOF 并累计大小，不能将 `read(n)` 的单次返回视为完整文件。参考图、生成图和真实人格数据不得提交到源码仓库。
+上传限制为 20 MB、2400 万像素；内置输出请求限制为 160 万像素，自定义图仅按节点元数据验证，管理员负责检查分辨率和批量数。HTTP 响应按块读取至 EOF 并累计大小，不能将 `read(n)` 的单次返回视为完整文件。参考图、生成图和真实人格数据不得提交到源码仓库。
 
 ## 6. 本地测试
 
@@ -94,9 +103,9 @@ $env:PYTEST_DISABLE_PLUGIN_AUTOLOAD = '1'
 python -m pytest tests -q -p pytest_asyncio.plugin --basetemp=.test-tmp-suite
 node tests/frontend.mjs
 node tests/frontend.mjs --modern
-python -m compileall -q main.py models.py store.py workflow.py comfy.py engine.py
-python -m mypy models.py store.py workflow.py comfy.py engine.py --no-site-packages --ignore-missing-imports --follow-imports=skip --strict
-python -m mypy main.py models.py store.py workflow.py comfy.py engine.py --no-site-packages --ignore-missing-imports --follow-imports=skip --strict --disable-error-code=misc
+python -m compileall -q main.py models.py store.py workflow.py workflow_config.py comfy.py engine.py
+python -m mypy models.py store.py workflow.py workflow_config.py comfy.py engine.py --no-site-packages --ignore-missing-imports --follow-imports=skip --strict
+python -m mypy main.py models.py store.py workflow.py workflow_config.py comfy.py engine.py --no-site-packages --ignore-missing-imports --follow-imports=skip --strict --disable-error-code=misc
 ```
 
 本机环境的第三方 stubs 存在解析冲突，因此类型检查使用 `--no-site-packages`；入口检查忽略未安装 SDK 的基类与装饰器检查。此方式验证本项目逻辑，不能替代完整 SDK 类型检查。
@@ -122,10 +131,11 @@ Windows 受限环境可能阻止异步事件循环或回环模拟服务，需要
 - NAS → 本机 ComfyUI 的网络访问。
 - AstrBot 现有视觉/提示词模型调用与 NapCat/OneBot 实际发图。
 - 不同人格连续场景的角色一致性与动作遵循。
-- API 工作流导入及节点映射尚未实现。
+- 动态工作流的实际生成与画像一致性；本次只读验证未提交生成。
+- Chrome 调试未连接，双设置的真实页面视觉仍待检查。
 
-## 9. 待确认的设置流程扩展
+## 9. 双设置实现验收记录（0.2.0）
 
-用户提出按连接检查、工作流发现/选择、节点信息加载和动态参数配置组织 ComfyUI 设置，并将共享 LLM 配置与独立人格画像集中到另一设置区域。可行性检查与实施边界见 [工作流驱动设置方案](docs/workflow-configuration-plan.md)。
+实施范围见 [方案与边界](docs/workflow-configuration-plan.md)。2026-10-29 使用新客户端从本机局域网地址列出 3 个 JSON，其中 `api/Anima+本地简易反推流.json` 为 32 节点 API 图。读取对应节点定义后得到 89 个标量/可映射输入；默认映射正面 218.text、负面 214.text、种子 220.seed、参考图 398.image、输出 222，所选输出依赖链裁剪为 23 节点，通过校验。没有提交 prompt。
 
-已只读验证当前 ComfyUI 能列出并读取保存的工作流；现有 Anima 文件是编辑器格式，需要配对 API 格式 JSON 后才能可靠提交。方案待确认，当前运行逻辑尚未变更。
+NAS 主机名只读检查成功，但未操作插件文件、配置或容器。61 项后端测试及新旧 bridge 前端交互检查通过。Chrome 调试未连接，本地预览服务已停止；不将模拟 DOM 测试描述为真实 Dashboard 验收。

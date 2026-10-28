@@ -14,6 +14,7 @@ from starlette.responses import JSONResponse, Response
 from astrbot_plugin_image_studio.comfy import ComfyUnavailable
 from astrbot_plugin_image_studio.models import Portrait, Settings
 from astrbot_plugin_image_studio.store import Store, revision
+from test_workflow_config import workflow_data
 
 
 @pytest.fixture
@@ -193,3 +194,42 @@ async def test_command_reports_connection_failure_in_user_reply(plugin):
     replies = [reply async for reply in instance.draw(event,"garden")]
     assert len(replies) == 1
     assert "暂时无法连接本地 ComfyUI" in replies[0]
+
+
+@pytest.mark.asyncio
+async def test_web_workflow_inspect_save_conflict_and_validation(plugin, workflow_data, monkeypatch):
+    import json
+    from astrbot_plugin_image_studio.comfy import ComfyClient
+    instance, request = plugin
+    config, info = workflow_data
+    monkeypatch.setattr(ComfyClient, "node_info", AsyncMock(return_value=info))
+    request.json.return_value = {"graph": config["graph"], "name": "example.json"}
+    response = await instance.web("workflow-inspect")
+    assert response.status_code == 200
+    data = json.loads(response.body)
+    assert data["suggested"]["output"] == "save"
+    assert not instance.store.read("workflow.json")
+    request.json.return_value = {"workflow": config, "revision": revision({})}
+    assert (await instance.web("workflow-save")).status_code == 200
+    stored = instance.store.read("workflow.json")
+    assert stored["fingerprint"] == revision(config["graph"])
+    assert (await instance.web("workflow-save")).status_code == 409
+    request.json.return_value["revision"] = revision(stored)
+    config["mapping"]["positive"] = ["missing", "text"]
+    assert (await instance.web("workflow-save")).status_code == 400
+    assert instance.store.read("workflow.json") == stored
+
+
+@pytest.mark.asyncio
+async def test_changed_workflow_invalidates_prompt_preview(plugin):
+    import json
+    instance, request = plugin
+    persona = "gentle artist"
+    instance.store.save_portrait(Portrait("alice", appearance="blue eyes", style="ink", persona_hash=hashlib.sha256(persona.encode()).hexdigest()))
+    request.json.return_value = {"persona_id": "alice", "idea": "garden"}
+    preview = json.loads((await instance.web("preview")).body)
+    instance.store.write("workflow.json", {"name": "changed"})
+    instance.engine.start = AsyncMock(return_value="job")
+    request.json.return_value["preview_token"] = preview["token"]
+    assert (await instance.web("generate")).status_code == 400
+    instance.engine.start.assert_not_awaited()

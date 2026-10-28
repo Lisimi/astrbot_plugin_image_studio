@@ -11,13 +11,16 @@ class Element {
 const root = new URL('../', import.meta.url);
 const html = await fs.readFile(new URL('pages/studio/index.html', root), 'utf8');
 const elements = new Map([...html.matchAll(/<(\w+)[^>]*\bid="([^"]+)"[^>]*>/g)].map((match) => [match[2], new Element(match[2], match[1].toUpperCase())]));
-const tabs = ['portraits','rules','create','history','settings'].map((name) => { const element = new Element('', 'BUTTON'); element.dataset.tab = name; return element; });
+const tabs = ['portraits','create','history','settings'].map((name) => { const element = new Element('', 'BUTTON'); element.dataset.tab = name; return element; });
 const sections = tabs.map((tab) => elements.get(tab.dataset.tab));
 sections.forEach((section) => { section.hidden = section.id !== 'portraits'; });
 const settings = Object.fromEntries(Object.entries(JSON.parse(await fs.readFile(new URL('_conf_schema.json', root), 'utf8'))).map(([key,value]) => [key,value.default]));
 let modelCalls = 0;
 let generationCalls = 0;
-const state = { settings, revision:'r1', personas:[{id:'alice'},{id:'bob'}], providers:[{id:'local-vl',model:'vision'}], portraits:{alice:{appearance:'blue eyes',style:'watercolor',image:'',auto:true},bob:{appearance:'green eyes',style:'ink',image:''}}, task:{active:null,cooldown_until:0},history:{items:[]} };
+let connectionFails = false;
+const graph = {p:{class_type:'CLIPTextEncode',inputs:{text:'original'}},s:{class_type:'KSampler',inputs:{steps:20,positive:['p',0]}},o:{class_type:'SaveImage',inputs:{images:['s',0]}}};
+const inspected = {name:'api/example.json',source:'api/example.json',url:settings.comfy_url,graph,fingerprint:'abc123',nodes:3,fields:[{node:'p',field:'text',label:'Positive text',type:'STRING',linked:false,value:'original',options:{},choices:[]},{node:'s',field:'steps',label:'Sampler steps',type:'INT',linked:false,value:20,options:{min:1,max:100},choices:[]}],outputs:[{id:'o',label:'SaveImage'}],suggested:{positive:['p','text'],output:'o'}};
+const state = { settings, revision:'r1', workflow:{}, workflow_revision:'w1', personas:[{id:'alice'},{id:'bob'}], providers:[{id:'local-vl',model:'vision'}], portraits:{alice:{appearance:'blue eyes',style:'watercolor',image:'',auto:true},bob:{appearance:'green eyes',style:'ink',image:''}}, task:{active:null,cooldown_until:0},history:{items:[]} };
 const bridge = {
   async ready() {},
   async apiGet(action) { if (action === 'state') return structuredClone(state); throw new Error('unexpected GET'); },
@@ -26,7 +29,10 @@ const bridge = {
     if (action === 'portrait') { state.portraits[body.persona_id] = body.portrait; return {}; }
     if (action === 'preview') { modelCalls++; return {prompt:'a character in a sunlit garden'}; }
     if (action === 'generate') { generationCalls++; return {id:'test-generation'}; }
-    if (action === 'connection') return {system:{comfyui_version:'test'}};
+    if (action === 'connection') { if (connectionFails) throw new Error('offline'); return {system:{comfyui_version:'test'}}; }
+    if (action === 'workflows') return {items:[{path:'api/example.json',modified:Date.now()}]};
+    if (action === 'workflow-inspect') return structuredClone(inspected);
+    if (action === 'workflow-save') { assert.equal(body.revision,state.workflow_revision,'stale workflow must not overwrite server changes'); state.workflow = {...body.workflow,fingerprint:'abc123'};state.workflow_revision='w2';return {revision:'w2'}; }
     throw new Error('unexpected POST');
   },
 };
@@ -55,4 +61,22 @@ el('width').value='904'; await el('save-settings').onclick();
 assert.match(el('notice').textContent,/stale form/); assert.equal(state.settings.width,896);
 await el('release').onclick();
 assert.equal(el('release').disabled,false);
-console.log(`Frontend checks passed (${bridgeName}): persona isolation, tabs, prompt preview, submit, draft preservation, revision conflict, controls restored.`);
+await el('connection').onclick();
+assert.equal(el('workflow-list').children[1].value,'api/example.json');
+el('workflow-list').value='api/example.json'; await el('workflow-load').onclick();
+assert.equal(el('workflow-editor').hidden,false);
+const fields = el('workflow-fields').children.flatMap((group) => group.children.slice(1));
+assert.equal(fields[0].hidden,true,'LLM mapped fields cannot also be scalar overrides');
+const enableSteps = fields[1].children[0].children[0];
+const steps = fields[1].children[1];
+assert.equal(steps.disabled,true); enableSteps.checked = true; enableSteps.onchange(); steps.value='30';
+await el('workflow-save').onclick();
+assert.equal(state.workflow.mapping.positive[0],'p');
+assert.equal(state.workflow.overrides[0].value,30);
+assert.equal(el('legacy-settings').hidden,true);
+state.workflow_revision='someone-else-changed'; await tick(); await settle();
+await el('workflow-save').onclick(); assert.match(el('notice').textContent,/stale workflow/);
+connectionFails=true; await el('connection').onclick(); assert.match(el('notice').textContent,/offline/);
+await el('workflow-save').onclick(); assert.match(el('notice').textContent,/先检测/);
+assert.equal(el('workflow-save').disabled,false);
+console.log(`Frontend checks passed (${bridgeName}): persona isolation, draft/revision safety, workflow discovery, dynamic fields, mapping, save, offline gate.`);

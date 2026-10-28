@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
+from urllib.parse import quote
 
 import aiohttp
 
@@ -43,6 +44,9 @@ class ComfyClient:
         self.base_url = base_url.rstrip("/")
 
     async def request(self, method: str, endpoint: str, *, payload: Object | None = None) -> Object:
+        return object_value(await self.request_json(method, endpoint, payload=payload))
+
+    async def request_json(self, method: str, endpoint: str, *, payload: Object | None = None) -> Json:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30), trust_env=False) as session:
             async with session.request(method, self.base_url + endpoint, json=payload, allow_redirects=False) as response:
                 body = await read_limited(response, 4 * 1024 * 1024)
@@ -52,7 +56,50 @@ class ComfyClient:
                     raise ComfyError(f"ComfyUI 返回 HTTP {response.status}")
                 if not 200 <= response.status < 300:
                     raise ComfyError("ComfyUI 不允许重定向")
-                return object_value(json.loads(body))
+                value: Json = json.loads(body)
+                return value
+
+    async def workflows(self) -> list[Json]:
+        await self.check_connection()
+        data = await self.request_json("GET", "/userdata?dir=workflows&recurse=true&split=false&full_info=true")
+        if not isinstance(data, list):
+            raise ComfyError("工作流列表格式错误")
+        result: list[Json] = []
+        for item in data:
+            entry = object_value(item)
+            path = entry.get("path")
+            if isinstance(path, str) and path.endswith(".json"):
+                self.workflow_path(path)
+                result.append(entry)
+        return result
+
+    @staticmethod
+    def workflow_path(path: str) -> str:
+        if not path or "\\" in path or any(part in ("", ".", "..") for part in path.split("/")) or ":" in path or not path.endswith(".json"):
+            raise ValueError("仅允许读取 workflows 下的 JSON 文件")
+        return "workflows/" + path
+
+    async def workflow(self, path: str) -> Object:
+        # Read only paths that the live userdata listing actually exposes.
+        items = await self.workflows()
+        if not any(object_value(item).get("path") == path for item in items):
+            raise ValueError("工作流已删除或不在可用列表中，请刷新")
+        return await self.request("GET", "/userdata/" + quote(self.workflow_path(path), safe=""))
+
+    async def node_info(self, graph: Object) -> Object:
+        classes = {str(object_value(node)["class_type"]) for node in graph.values()}
+        result: Object = {}
+        semaphore = asyncio.Semaphore(4)
+
+        async def load(kind: str) -> None:
+            async with semaphore:
+                result.update(await self.request("GET", "/object_info/" + quote(kind, safe="")))
+
+        try:
+            await asyncio.wait_for(asyncio.gather(*(load(kind) for kind in classes)), timeout=30)
+        except (aiohttp.ClientError, OSError, TimeoutError, ComfyError, ValueError) as error:
+            raise ComfyUnavailable() from error
+        return result
 
     async def idle(self) -> bool:
         queue = await self.request("GET", "/queue")

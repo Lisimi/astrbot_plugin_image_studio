@@ -15,6 +15,7 @@ from .comfy import ComfyClient, ComfyError, ComfyUnavailable, SubmissionRejected
 from .models import Object, Portrait, Settings, object_value, string
 from .store import Store
 from .workflow import build_workflow
+from .workflow_config import render_workflow, seed_range, validate_workflow
 
 T = TypeVar("T")
 _gates: dict[str, asyncio.Lock] = {}
@@ -60,16 +61,26 @@ class Engine:
     async def start(self, settings: Settings, portrait: Portrait, prepare: Prepare, origin: str = "") -> str:
         if not portrait.appearance or not portrait.style:
             raise ValueError("请先保存画像的外观与画风")
-        if portrait.mode == "img2img":
+        workflow = self.store.read("workflow.json")
+        mapping = object_value(workflow.get("mapping", {}))
+        if workflow and workflow.get("url") != settings.comfy_url:
+            raise ValueError("ComfyUI 地址已变化，请重新加载并保存工作流")
+        if mapping.get("image") or (not workflow and portrait.mode == "img2img"):
             self.store.path("portraits", portrait.image)
         async with self.gate:
             state = self.check()
             if not await ComfyClient(settings.comfy_url).check_connection():
                 raise ValueError("ComfyUI 已有其他任务，本次没有提交")
+            low, high = 0, 2**50 - 1
+            if workflow:
+                info = await ComfyClient(settings.comfy_url).node_info(object_value(workflow["graph"]))
+                validate_workflow(workflow, info)
+                low, high = seed_range(workflow, info)
             job: Object = {"id": str(uuid.uuid4()), "stage": "preparing", "started": time.time(),
                            "persona_id": portrait.persona_id, "origin": origin,
                            "settings": settings.to_dict(), "portrait": portrait.to_dict(),
-                           "seed": secrets.randbelow(2**50), "prompt_id": "", "prompt": ""}
+                           "seed": low + secrets.randbelow(high - low + 1), "prompt_id": "", "prompt": "",
+                           "workflow": workflow}
             state["active"] = job
             self.store.write("state.json", state)
             _live.add(string(job["id"]))
@@ -100,15 +111,17 @@ class Engine:
                     return
                 prompt = await prepare()
                 portrait = Portrait.read(object_value(job["portrait"]))
+                workflow = object_value(job.get("workflow", {}))
                 image = ""
-                if portrait.mode == "img2img":
+                if object_value(workflow.get("mapping", {})).get("image") or (not workflow and portrait.mode == "img2img"):
                     image = await client.upload(self.store.path("portraits", portrait.image))
                 if not await client.idle():
                     self.finish(job, "rejected", "ComfyUI 正忙，本次没有提交")
                     return
                 seed = job["seed"]
                 assert isinstance(seed, int)
-                graph = build_workflow(settings, portrait, prompt, seed, image)
+                graph = (render_workflow(workflow, prompt, seed, settings.negative, image, portrait.denoise)
+                         if workflow else build_workflow(settings, portrait, prompt, seed, image))
                 prompt_id = str(uuid.uuid4())
                 self.update(job, stage="submitting", prompt=prompt, prompt_id=prompt_id)
                 returned_id = await client.submit(graph, prompt_id)
@@ -126,7 +139,9 @@ class Engine:
                         self.finish(job, "failed", "ComfyUI 执行失败，请查看 ComfyUI 日志")
                         return
                     outputs = object_value(result.get("outputs", {}))
-                    output = object_value(outputs.get("222", {}))
+                    workflow = object_value(job.get("workflow", {}))
+                    output_id = string(object_value(workflow.get("mapping", {})).get("output", "222"))
+                    output = object_value(outputs.get(output_id, {}))
                     images = output.get("images", [])
                     if isinstance(images, list) and images:
                         data = await client.download(object_value(images[0]))
