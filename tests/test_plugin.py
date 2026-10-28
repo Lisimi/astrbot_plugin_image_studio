@@ -169,6 +169,36 @@ async def test_tool_instructs_model_to_report_offline_failure(plugin):
     assert result["reason"] == "comfy_unavailable"
     assert "本次未生成图片" in result["message"]
     assert "不要声称正在生成" in result["instruction"]
+    assert "保持当前人格的交流方式、语气和称呼" in result["instruction"]
+    assert "不要照搬错误原文" in result["instruction"]
+
+
+@pytest.mark.asyncio
+async def test_tool_rejection_preserves_persona_tone_without_hiding_failure(plugin):
+    import json
+    instance, _ = plugin
+    instance.accept = AsyncMock(side_effect=ValueError("全局冷却中，剩余 120 秒"))
+    result = json.loads(await instance.image_generate(object(), "garden"))
+    assert result["ok"] is False
+    assert result["reason"] == "request_rejected"
+    assert "120 秒" in result["message"]
+    assert "保持当前人格的交流方式、语气和称呼" in result["instruction"]
+    assert "不切换为系统通知或客服口吻" in result["instruction"]
+    assert "不要承诺自动重试" in result["instruction"]
+
+
+@pytest.mark.asyncio
+async def test_chat_guidance_appends_rules_and_keeps_original_persona(plugin):
+    instance, _ = plugin
+    persona = "gentle artist"
+    instance.store.save_portrait(Portrait("alice", appearance="blue eyes", style="ink", auto=True,
+        persona_hash=hashlib.sha256(persona.encode()).hexdigest()))
+    event = SimpleNamespace(unified_msg_origin="qq:friend:1", get_platform_name=lambda:"aiocqhttp")
+    request = SimpleNamespace(system_prompt="Original persona: speak softly and call me captain.")
+    await instance.guide(event, request)
+    assert request.system_prompt.startswith("Original persona: speak softly and call me captain.")
+    assert "保持当前人格的交流方式、语气和称呼" in request.system_prompt
+    assert "不要照搬错误原文" in request.system_prompt
 
 
 @pytest.mark.asyncio

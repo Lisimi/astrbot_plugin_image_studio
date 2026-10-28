@@ -42,6 +42,8 @@ AstrBot `4.28.2` 只扫描 `pages/<页面名>/index.html`，桥接对象为 `Ast
 
 `ComfyClient.check_connection` 将网络错误、超时、HTTP 失败及不合法响应转换为可直接反馈的 `ComfyUnavailable`。提示词调用前再次检查连接，覆盖预览和受理后断线的情况。手动指令返回明确的中文失败信息，LLM 工具返回 `ok=false`、`reason=comfy_unavailable` 及回复指导，网页返回 HTTP 503。正常聊天仍可进行；离线不自动切换生图方式。
 
+`TOOL_REPLY_RULE` 统一约束 LLM 工具的失败表达：保留当前人格语气/称呼，工具 message 是事实而非逐字回复模板，不主动复述技术诊断或任务编号。冷却/忙碌等 ValueError 同样返回 ok=false/message/instruction，离线保留 comfy_unavailable 分类。guide 保留原 system_prompt 后追加规则，受理成功时可自然说明正在生成；失败时不得虚构成功或承诺自动重试。手动指令及后台失败通知仍直接发送状态，不新增一次 LLM 调用，不声称所有通知都已拟人化。
+
 提交后断线不等于生成失败：保留原任务为 unknown，告知无法确认结果，不宣称没有生成，也不自动重提。后端发送通道和 LLM 回复遵循这一差异。
 
 ## 4. 页面与后端接口
@@ -138,4 +140,4 @@ Windows 受限环境可能阻止异步事件循环或回环模拟服务，需要
 
 实施范围见 [方案与边界](docs/workflow-configuration-plan.md)。2026-10-29 使用新客户端从本机局域网地址列出 3 个 JSON，其中 `api/Anima+本地简易反推流.json` 为 32 节点 API 图。读取对应节点定义后得到 89 个标量/可映射输入；默认映射正面 218.text、负面 214.text、种子 220.seed、参考图 398.image、输出 222，所选输出依赖链裁剪为 23 节点，通过校验。没有提交 prompt。
 
-NAS 主机名只读检查成功，但未操作插件文件、配置或容器。61 项后端测试及新旧 bridge 前端交互检查通过。Chrome 调试未连接，本地预览服务已停止；不将模拟 DOM 测试描述为真实 Dashboard 验收。
+NAS 主机名只读检查成功，但未操作插件文件、配置或容器。63 项后端测试及新旧 bridge 前端交互检查通过。Chrome 调试未连接，本地预览服务已停止；不将模拟 DOM 测试描述为真实 Dashboard 验收。
