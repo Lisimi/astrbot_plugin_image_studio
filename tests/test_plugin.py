@@ -124,6 +124,17 @@ def test_schema_and_api_example_match_code():
     assert graph["220"]["inputs"]["steps"] == 36
 
 
+def test_page_discovery_matches_astrbot_428_contract():
+    import json
+    root = Path(__file__).resolve().parents[1]
+    page = root / "pages" / "studio"
+    assert (page / "index.html").is_file()
+    assert (page / "app.js").is_file()
+    assert (page / "style.css").is_file()
+    locale = json.loads((root / ".astrbot-plugin/i18n/zh-CN.json").read_text("utf-8"))
+    assert locale["pages"]["studio"]["title"] == "生图工作室"
+
+
 @pytest.mark.asyncio
 async def test_confirm_uses_exact_preview_without_second_llm_call(plugin):
     import json

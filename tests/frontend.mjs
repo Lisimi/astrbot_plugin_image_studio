@@ -9,7 +9,7 @@ class Element {
   setAttribute(key, value) { this[key] = value; }
 }
 const root = new URL('../', import.meta.url);
-const html = await fs.readFile(new URL('views/studio/index.html', root), 'utf8');
+const html = await fs.readFile(new URL('pages/studio/index.html', root), 'utf8');
 const elements = new Map([...html.matchAll(/<(\w+)[^>]*\bid="([^"]+)"[^>]*>/g)].map((match) => [match[2], new Element(match[2], match[1].toUpperCase())]));
 const tabs = ['portraits','rules','create','history','settings'].map((name) => { const element = new Element('', 'BUTTON'); element.dataset.tab = name; return element; });
 const sections = tabs.map((tab) => elements.get(tab.dataset.tab));
@@ -32,8 +32,9 @@ const bridge = {
 };
 let tick;
 const document = { getElementById(id) { assert(elements.has(id), `missing element ${id}`); return elements.get(id); }, createElement(tag) { return new Element('', tag.toUpperCase()); }, querySelectorAll(selector) { if (selector === 'nav button') return tabs; if (selector === 'main>section') return sections; if (selector === 'button,input,select,textarea') return [...elements.values(),...tabs]; throw new Error(selector); } };
-const window = { AstrBotPluginView:bridge, setInterval(fn) { tick = fn; return 1; }, clearInterval() {}, addEventListener() {}, confirm() { return false; } };
-vm.runInNewContext(await fs.readFile(new URL('views/studio/app.js', root), 'utf8'), {document,window,Option:class {constructor(text,value) { this.text=text;this.value=value; }},console});
+const bridgeName = process.argv.includes('--modern') ? 'AstrBotPluginView' : 'AstrBotPluginPage';
+const window = { [bridgeName]:bridge, setInterval(fn) { tick = fn; return 1; }, clearInterval() {}, addEventListener() {}, confirm() { return false; } };
+vm.runInNewContext(await fs.readFile(new URL('pages/studio/app.js', root), 'utf8'), {document,window,Option:class {constructor(text,value) { this.text=text;this.value=value; }},console});
 const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
 const el = (id) => elements.get(id);
 await settle();
@@ -54,4 +55,4 @@ el('width').value='904'; await el('save-settings').onclick();
 assert.match(el('notice').textContent,/stale form/); assert.equal(state.settings.width,896);
 await el('release').onclick();
 assert.equal(el('release').disabled,false);
-console.log('Frontend checks passed: persona isolation, tabs, prompt preview, submit, draft preservation, revision conflict, controls restored.');
+console.log(`Frontend checks passed (${bridgeName}): persona isolation, tabs, prompt preview, submit, draft preservation, revision conflict, controls restored.`);

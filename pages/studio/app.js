@@ -1,5 +1,5 @@
 const $ = (id) => document.getElementById(id);
-const bridge = window.AstrBotPluginView;
+const bridge = window.AstrBotPluginView || window.AstrBotPluginPage;
 let state = null;
 let formRevision = "";
 let portraitImage = "";
