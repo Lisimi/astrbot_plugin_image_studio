@@ -1,0 +1,145 @@
+"""Exercise AstrBot-facing behavior with an explicit SDK test double."""
+
+import hashlib
+import importlib
+import sys
+import types
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
+import pytest
+from starlette.responses import JSONResponse, Response
+
+from astrbot_plugin_image_studio.models import Portrait, Settings
+from astrbot_plugin_image_studio.store import Store, revision
+
+
+@pytest.fixture
+def plugin(monkeypatch, tmp_path):
+    modules = {name: types.ModuleType(name) for name in (
+        "astrbot", "astrbot.api", "astrbot.api.event", "astrbot.api.star", "astrbot.api.web",
+        "astrbot.core", "astrbot.core.message", "astrbot.core.message.message_event_result",
+        "astrbot.core.provider", "astrbot.core.provider.entities", "astrbot.core.star",
+        "astrbot.core.star.filter", "astrbot.core.star.filter.command")}
+    for name, module in modules.items():
+        monkeypatch.setitem(sys.modules, name, module)
+    class Config(dict):
+        def save_config(self, data):
+            self.update(data)
+    class Star:
+        def __init__(self, context):
+            self.context = context
+    def decorator(*args, **kwargs):
+        return lambda function: function
+    modules["astrbot.api"].AstrBotConfig = Config
+    modules["astrbot.api"].logger = SimpleNamespace(exception=lambda *args: None)
+    modules["astrbot.api.event"].AstrMessageEvent = object
+    modules["astrbot.api.event"].MessageEventResult = object
+    modules["astrbot.api.event"].filter = SimpleNamespace(command=decorator,llm_tool=decorator,on_llm_request=decorator)
+    modules["astrbot.api.star"].Context = object
+    modules["astrbot.api.star"].Star = Star
+    modules["astrbot.api.star"].StarTools = SimpleNamespace(get_data_dir=lambda name: tmp_path)
+    modules["astrbot.core.message.message_event_result"].MessageChain = object
+    modules["astrbot.core.provider.entities"].ProviderRequest = object
+    modules["astrbot.core.star.filter.command"].GreedyStr = str
+    request = SimpleNamespace(method="POST", username="admin", json=AsyncMock(return_value={}))
+    modules["astrbot.api.web"].request = request
+    modules["astrbot.api.web"].json_response = JSONResponse
+    modules["astrbot.api.web"].error_response = lambda message,status_code=400: JSONResponse({"message":message}, status_code=status_code)
+    modules["astrbot.api.web"].file_response = lambda *args,**kwargs: Response()
+    monkeypatch.delitem(sys.modules, "astrbot_plugin_image_studio.main", raising=False)
+    main = importlib.import_module("astrbot_plugin_image_studio.main")
+    persona_manager = SimpleNamespace(get_persona=AsyncMock(return_value=SimpleNamespace(system_prompt="gentle artist")),
+        resolve_selected_persona=AsyncMock(return_value=("alice", {"prompt":"gentle artist"}, None, False)))
+    context = SimpleNamespace(register_web_api=lambda *args:None, persona_manager=persona_manager,
+        conversation_manager=SimpleNamespace(get_curr_conversation_id=AsyncMock(return_value=None)),
+        llm_generate=AsyncMock(return_value=SimpleNamespace(completion_text='{"scene":"smiling in a garden"}')),
+        get_current_chat_provider_id=AsyncMock(return_value="chat"))
+    instance = main.ImageStudio(context, Config(Settings(prompt_provider="test").to_dict()))
+    return instance, request
+
+
+@pytest.mark.asyncio
+async def test_resolved_persona_uses_host_session_rules(plugin):
+    instance, _ = plugin
+    event = SimpleNamespace(unified_msg_origin="qq:friend:1", get_platform_name=lambda:"aiocqhttp")
+    assert await instance.persona(event) == ("alice", "gentle artist")
+    instance.context.persona_manager.resolve_selected_persona.assert_awaited_once_with(
+        umo="qq:friend:1", conversation_persona_id=None, platform_name="aiocqhttp")
+
+
+@pytest.mark.asyncio
+async def test_no_persona_does_not_fall_back_to_other_portraits(plugin):
+    instance, _ = plugin
+    instance.context.persona_manager.resolve_selected_persona.return_value = ("[%None]", None, None, False)
+    event = SimpleNamespace(unified_msg_origin="qq:friend:1", get_platform_name=lambda:"aiocqhttp")
+    with pytest.raises(ValueError, match="没有"):
+        await instance.persona(event)
+
+
+@pytest.mark.asyncio
+async def test_prompt_preserves_fixed_identity_and_rejects_stale_persona(plugin):
+    instance, _ = plugin
+    persona = "gentle artist"
+    portrait = Portrait("alice", appearance="blue eyes", style="watercolor", persona_hash=hashlib.sha256(persona.encode()).hexdigest())
+    prompt = await instance.prompt(instance.settings(), portrait, persona, "garden")
+    assert "blue eyes" in prompt and "watercolor" in prompt and "smiling in a garden" in prompt
+    assert "tools" not in instance.context.llm_generate.call_args.kwargs
+    with pytest.raises(ValueError, match="人格已变化"):
+        await instance.prompt(instance.settings(), portrait, "new persona", "garden")
+
+
+@pytest.mark.asyncio
+async def test_web_requires_dashboard_identity(plugin):
+    instance, request = plugin
+    request.username = None
+    assert (await instance.web("settings")).status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_web_config_conflict_and_persistence(plugin):
+    instance, request = plugin
+    request.json.return_value = {"revision":"old", "settings":instance.settings().to_dict()}
+    assert (await instance.web("settings")).status_code == 409
+    original = instance.settings().to_dict()
+    request.json.return_value = {"revision":revision(original), "settings":original | {"cooldown_seconds":60}}
+    assert (await instance.web("settings")).status_code == 200
+    assert instance.settings().cooldown_seconds == 60
+
+
+@pytest.mark.asyncio
+async def test_web_unknown_task_requires_explicit_release(plugin):
+    instance, request = plugin
+    request.json.return_value = {}
+    assert (await instance.web("release")).status_code == 400
+
+
+def test_schema_and_api_example_match_code():
+    import json
+    root = Path(__file__).resolve().parents[1]
+    schema = json.loads((root / "_conf_schema.json").read_text("utf-8"))
+    assert {key: value["default"] for key, value in schema.items()} == Settings().to_dict()
+    graph = json.loads((root / "workflows/anima_api.json").read_text("utf-8"))
+    assert graph["220"]["inputs"]["steps"] == 36
+
+
+@pytest.mark.asyncio
+async def test_confirm_uses_exact_preview_without_second_llm_call(plugin):
+    import json
+    instance, request = plugin
+    persona = "gentle artist"
+    portrait = Portrait("alice",appearance="blue eyes",style="watercolor",persona_hash=hashlib.sha256(persona.encode()).hexdigest())
+    instance.store.save_portrait(portrait)
+    request.json.return_value = {"persona_id":"alice","idea":"garden"}
+    response = await instance.web("preview")
+    assert response.status_code == 200
+    preview = json.loads(response.body)
+    instance.engine.start = AsyncMock(return_value="job")
+    request.json.return_value = {"persona_id":"alice","idea":"garden","preview_token":preview["token"]}
+    assert (await instance.web("generate")).status_code == 200
+    prepare = instance.engine.start.call_args.args[2]
+    assert await prepare() == preview["prompt"]
+    assert instance.context.llm_generate.await_count == 1
+    request.json.return_value["idea"] = "changed scene"
+    assert (await instance.web("generate")).status_code == 400

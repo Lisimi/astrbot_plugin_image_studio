@@ -1,0 +1,101 @@
+{
+  "206": {
+    "class_type": "UNETLoader",
+    "inputs": {
+      "unet_name": "anima_baseV10.safetensors",
+      "weight_dtype": "default"
+    }
+  },
+  "207": {
+    "class_type": "CLIPLoader",
+    "inputs": {
+      "clip_name": "qwen_3_06b_base.safetensors",
+      "type": "qwen_image",
+      "device": "default"
+    }
+  },
+  "205": {
+    "class_type": "VAELoader",
+    "inputs": {
+      "vae_name": "qwen_image_vae.safetensors"
+    }
+  },
+  "218": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "clip": [
+        "207",
+        0
+      ],
+      "text": "REPLACE_WITH_GENERATED_PROMPT"
+    }
+  },
+  "214": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "clip": [
+        "207",
+        0
+      ],
+      "text": "worst quality, low quality, score_1, score_2, score_3, artist name, lowres, jpeg, text, words, logo, cropped, bad composition, artifacts, bad proportions, inaccurate limb, bad anatomy, extra fingers, missing fingers, extra arms, extra legs, inaccurate eyes, watermark"
+    }
+  },
+  "208": {
+    "class_type": "EmptyLatentImage",
+    "inputs": {
+      "width": 888,
+      "height": 1184,
+      "batch_size": 1
+    }
+  },
+  "220": {
+    "class_type": "KSampler",
+    "inputs": {
+      "model": [
+        "206",
+        0
+      ],
+      "positive": [
+        "218",
+        0
+      ],
+      "negative": [
+        "214",
+        0
+      ],
+      "latent_image": [
+        "208",
+        0
+      ],
+      "seed": 12345,
+      "steps": 36,
+      "cfg": 4.0,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "denoise": 1.0
+    }
+  },
+  "221": {
+    "class_type": "VAEDecode",
+    "inputs": {
+      "samples": [
+        "220",
+        0
+      ],
+      "vae": [
+        "205",
+        0
+      ]
+    }
+  },
+  "222": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "images": [
+        "221",
+        0
+      ],
+      "filename_prefix": "astrbot_image_studio"
+    }
+  }
+}

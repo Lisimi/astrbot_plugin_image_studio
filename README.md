@@ -1,6 +1,6 @@
 # AstrBot 生图工作室
 
-当前版本：0.1.0。2026-10-29 已完成本地实现与自动化验证，尚未部署 NAS，尚未执行真实 LLM 调用或生图。
+当前版本：0.1.0。2026-10-29 已完成本地实现、32 项后端测试及一张本地 ComfyUI 实际出图。尚未部署 NAS，也未调用 AstrBot 配置的 LLM。详情见 [实际出图测试](docs/smoke-test-20261029.md)。
 
 ## 首版范围
 
@@ -43,11 +43,11 @@ LLM 使用 AstrBot 已配置的提供商；其推理费用取决于所选服务�
 
 - NAS：`192.168.0.105`，容器 `astrbot`，宿主机插件目录 `/vol1/1000/Docker/astrbot/data/plugins`。
 - 本机以太网地址：`192.168.0.203`，ComfyUI `0.30.2`，端口 8188。
-- 检查时 ComfyUI 仅监听 `127.0.0.1`，NAS 不能直接访问。需要在下一阶段调整监听方式，并根据实际情况添加仅允许 NAS 的防火墙规则。
+- 2026-10-29 用户已改为 `--listen 0.0.0.0`，本机访问局域网地址成功。NAS 到本机的访问仍待单独验证。
 
-本地已只读查询运行中的 ComfyUI，验证 API 示例使用的节点、模型选项与必要参数，未提交 `/prompt`。
+本地已验证节点、模型与必要参数，并通过插件核心流程生成、下载一张图片；没有重新提交同一任务。
 
-AstrBot 必须支持 Plugin Views、`astrbot.api.web`、`context.llm_generate` 和 `persona_manager.resolve_selected_persona`。元信息的最低版本门槛不代表这些能力在所有发行版均存在；NAS 的实际版本及插件加载尚待联调。缺少统一人格解析接口时插件会明确报错，避免绑定错人格。
+AstrBot 必须支持 Plugin Views、`astrbot.api.web`、`context.llm_generate` 和 `persona_manager.resolve_selected_persona`。Dashboard 已确认运行版本 `4.28.2`，该版本的官方源码具有公共 Web API 与统一人格解析接口；实际插件加载仍待 NAS 联调。缺少统一人格解析接口时插件会明确报错，避免绑定错人格。
 
 ## 安装后设置步骤
 
@@ -87,7 +87,7 @@ python -m pytest tests -q -p pytest_asyncio.plugin --basetemp=.test-tmp-suite
 node tests/frontend.mjs
 ```
 
-目前覆盖并发、冷却、人格解析与隔离、档案失效、预览确认、重载恢复、路径及图片校验、配置冲突，以及模拟 ComfyUI 的 HTTP 上传/提交/轮询/下载全流程。测试未调用真实模型。
+32 项后端测试覆盖并发、冷却、人格解析与隔离、档案失效、预览确认、重载恢复、路径及图片校验、配置冲突，以及模拟 ComfyUI 的 HTTP 上传/提交/轮询/下载全流程，包含延迟分块下载回归测试。自动化测试未调用真实模型；另已完成一张实际出图。
 
 核心模块通过严格 mypy 检查；入口适配层在未安装 SDK 的本机环境下额外忽略 SDK 基类/装饰器相关检查。Python 编译和前端脚本语法检查通过。
 

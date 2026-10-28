@@ -1,0 +1,77 @@
+{
+  "comfy_url": {
+    "type": "string",
+    "description": "ComfyUI 地址",
+    "default": "http://192.168.0.203:8188"
+  },
+  "vision_provider": {
+    "type": "string",
+    "description": "画像解析模型 ID",
+    "default": ""
+  },
+  "prompt_provider": {
+    "type": "string",
+    "description": "提示词模型 ID",
+    "default": ""
+  },
+  "cooldown_seconds": {
+    "type": "int",
+    "description": "全局冷却秒数",
+    "default": 300
+  },
+  "task_timeout": {
+    "type": "int",
+    "description": "任务等待秒数",
+    "default": 600
+  },
+  "width": {
+    "type": "int",
+    "description": "图片宽度",
+    "default": 888
+  },
+  "height": {
+    "type": "int",
+    "description": "图片高度",
+    "default": 1184
+  },
+  "unet": {
+    "type": "string",
+    "description": "UNet 模型",
+    "default": "anima_baseV10.safetensors"
+  },
+  "clip": {
+    "type": "string",
+    "description": "文本编码器",
+    "default": "qwen_3_06b_base.safetensors"
+  },
+  "vae": {
+    "type": "string",
+    "description": "VAE 模型",
+    "default": "qwen_image_vae.safetensors"
+  },
+  "steps": {
+    "type": "int",
+    "description": "采样步数",
+    "default": 36
+  },
+  "cfg": {
+    "type": "float",
+    "description": "CFG",
+    "default": 4.0
+  },
+  "negative": {
+    "type": "text",
+    "description": "负面提示词",
+    "default": "worst quality, low quality, score_1, score_2, score_3, artist name, lowres, jpeg, text, words, logo, cropped, bad composition, artifacts, bad proportions, inaccurate limb, bad anatomy, extra fingers, missing fingers, extra arms, extra legs, inaccurate eyes, watermark"
+  },
+  "prompt_rules": {
+    "type": "text",
+    "description": "提示词生成规则",
+    "default": "用英文描述一幅画面，保持角色身份和画风，动作、表情、场景符合当前人格与用户要求。"
+  },
+  "auto_rules": {
+    "type": "text",
+    "description": "自动发图规则",
+    "default": "仅在用户想看角色或图片对表达当前情境有帮助时调用，避免每轮发图。"
+  }
+}
