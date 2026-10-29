@@ -65,8 +65,12 @@ class Engine:
         mapping = object_value(workflow.get("mapping", {}))
         if workflow and workflow.get("url") != settings.comfy_url:
             raise ValueError("ComfyUI 地址已变化，请重新加载并保存工作流")
-        if mapping.get("image") or (not workflow and portrait.mode == "img2img"):
-            self.store.path("portraits", portrait.image)
+        needs_image = bool(mapping.get("image") or (not workflow and portrait.mode == "img2img"))
+        if needs_image:
+            if not portrait.references:
+                raise ValueError("所选生成方式需要至少一张人格参考图片")
+            for name in portrait.references:
+                self.store.path("portraits", name)
         async with self.gate:
             state = self.check()
             if not await ComfyClient(settings.comfy_url).check_connection():
@@ -80,7 +84,8 @@ class Engine:
                            "persona_id": portrait.persona_id, "origin": origin,
                            "settings": settings.to_dict(), "portrait": portrait.to_dict(),
                            "seed": low + secrets.randbelow(high - low + 1), "prompt_id": "", "prompt": "",
-                           "workflow": workflow}
+                           "workflow": workflow,
+                           "reference_image": secrets.choice(portrait.references) if needs_image else ""}
             state["active"] = job
             self.store.write("state.json", state)
             _live.add(string(job["id"]))
@@ -114,7 +119,8 @@ class Engine:
                 workflow = object_value(job.get("workflow", {}))
                 image = ""
                 if object_value(workflow.get("mapping", {})).get("image") or (not workflow and portrait.mode == "img2img"):
-                    image = await client.upload(self.store.path("portraits", portrait.image))
+                    selected = string(job.get("reference_image", portrait.image), 128)
+                    image = await client.upload(self.store.path("portraits", selected))
                 if not await client.idle():
                     self.finish(job, "rejected", "ComfyUI 正忙，本次没有提交")
                     return

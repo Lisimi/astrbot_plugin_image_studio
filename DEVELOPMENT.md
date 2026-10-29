@@ -34,7 +34,7 @@ AstrBot `4.28.2` 只扫描 `pages/<页面名>/index.html`，桥接对象为 `Ast
 2. 读取对应画像，核对人格内容哈希。人格变化后要求管理员重新确认画像。
 3. `Engine.start` 在互斥区内检查活动任务和冷却，以最长 5 秒查询真实 ComfyUI 队列。连接失败时直接拒绝，已有其他任务时提示忙碌；两者均不创建任务或新冷却。自定义工作流还须校验地址与实时节点定义，缺少模型/映射则拒绝；检查通过才持久化包括完整工作流在内的快照并后台处理。
 4. LLM 根据人格、档案、画面需求和当前消息生成动态画面描述；插件组合固定外观和画风。内部请求不提供生图工具，避免递归。
-5. 内置图生图或自定义图有参考图映射时上传当前人格画像。仅替换映射/覆盖输入，裁剪到所选输出依赖链；再次检查队列后提交一次，持久化任务 ID。
+5. 内置图生图或自定义图有参考图映射时，从该人格全部例图随机选一张，将文件名持久化到 reference_image 后再后台上传。仅替换映射/覆盖输入，裁剪到所选输出依赖链；再次检查队列后提交一次，持久化任务 ID。
 6. 轮询原任务并下载保存图片。聊天任务发送至原会话；网页任务在生成记录中查看。
 7. 结束后保存历史并进入冷却。异常状态保留原任务，恢复时查询，不盲目重新提交。
 
@@ -61,7 +61,7 @@ AstrBot `4.28.2` 只扫描 `pages/<页面名>/index.html`，桥接对象为 `Ast
 | `POST workflow-save` | 根据实时节点定义校验图、映射及覆盖，并核对 workflow revision；空对象切回内置图 |
 | `POST upload` | 上传参考图，返回服务器生成的文件名 |
 | `POST portrait` | 保存与确认指定人格画像 |
-| `POST analyze` | 使用已配置的视觉模型解析例图 |
+| `POST analyze` | 接收 persona_id/images（兼容单个 image），在共享互斥入口受理后台分析并立即返回 id；进度/结果通过 GET state.analysis 读取 |
 | `POST preview` / `generate` | 预览提示词或受理实际生图 |
 | `POST recover` | 查询/恢复原任务 |
 | `POST release` | 显式确认后解除未知任务，要求 ComfyUI 队列空闲 |
@@ -74,7 +74,7 @@ AstrBot `4.28.2` 只扫描 `pages/<页面名>/index.html`，桥接对象为 `Ast
 
 没有 `workflow.json` 或内容为空时使用原 Anima 构建器，节点 218/214/222 保持兼容。自定义图保留用户原图，只替换显式映射的正面/负面、种子、参考图和强度，以及勾选的字面量覆盖。图复制后按指定 SaveImage/PreviewImage 输出递归裁剪依赖，不执行无关输出节点；映射不在依赖链上则拒绝。
 
-内置模式的文生图使用空 latent，参考图重绘使用 LoadImage → 缩放 → VAEEncode。自定义流程的模式由原图开关和参数决定，不会因人格旧 mode 字段自动改图；映射 image 时总是上传该人格参考图，映射 denoise 时注入其强度。原图姿势/构图是否保留及身份一致性由节点能力决定。
+内置模式的文生图使用空 latent，参考图重绘使用 LoadImage → 缩放 → VAEEncode。自定义流程的模式由原图开关和参数决定，不会因人格旧 mode 字段自动改图；映射 image 时从该人格例图列表随机选一张上传，映射 denoise 时注入其强度。原图姿势/构图是否保留及身份一致性由节点能力决定。
 
 输入定义逐 class 请求 `/object_info/{编码类型名}`，并发上限 4、总等待 30 秒。支持旧枚举数组与新 COMBO/options，连接类型兼容通用 `*` 与 ComfyUI 的 `COMFY_MATCHTYPE_V3`。普通覆盖不允许连线；明确的提示词/种子等映射允许替换相应连线。校验节点存在、必填字段、连接序号/类型、数值/枚举、映射冲突与死节点，拒绝远程 `api_node`。任意自定义字面量、子图及远程服务不在承诺范围。
 
@@ -84,10 +84,11 @@ ComfyUI 队列检查不能阻止用户稍后手动提交任务；本插件只约
 
 持久数据位于 AstrBot 的 `data/plugin_data/astrbot_plugin_image_studio/`：
 
-- `portraits.json` / `portraits/`：人格画像档案及图片。
+- `portraits.json` / `portraits/`：人格画像档案及图片。images 是按人格维护的文件名列表；旧 image 自动读取为单元素列表，保存时 image 保留为首张兼容字段。显式 images=[] 表示移出全部，不能被旧 image 重新补回。
 - `state.json`：活动任务、配置快照与冷却截止时间。
 - `history.json` / `outputs/`：最近 200 条任务记录与输出图片；输出文件暂不自动清理。
 - `preview.json`：最近一次提示词预览及有效性信息，包含 workflow revision。
+- `analysis.json`：最近一次全部例图分析的 id/persona_id/images/stage/processed/total/result/error，不包含图像 base64。分析失败保留进度，不写入已保存档案，重载不自动重复 LLM 调用。
 - `workflow.json`：`name/source/url/graph/mapping/overrides/negative/fingerprint`，自定义图完整快照；与 AstrBot 配置分开保存。保存有独立 revision 并发检查，重新加载同名来源保留映射，失效字段提示用户修复。旧任务没有 workflow 字段时仍从输出 222 恢复。
 
 上传限制为 20 MB、2400 万像素；内置输出请求限制为 160 万像素，自定义图仅按节点元数据验证，管理员负责检查分辨率和批量数。HTTP 响应按块读取至 EOF 并累计大小，不能将 `read(n)` 的单次返回视为完整文件。参考图、生成图和真实人格数据不得提交到源码仓库。
@@ -141,3 +142,17 @@ Windows 受限环境可能阻止异步事件循环或回环模拟服务，需要
 实施范围见 [方案与边界](docs/workflow-configuration-plan.md)。2026-10-29 使用新客户端从本机局域网地址列出 3 个 JSON，其中 `api/Anima+本地简易反推流.json` 为 32 节点 API 图。读取对应节点定义后得到 89 个标量/可映射输入；默认映射正面 218.text、负面 214.text、种子 220.seed、参考图 398.image、输出 222，所选输出依赖链裁剪为 23 节点，通过校验。没有提交 prompt。
 
 NAS 主机名只读检查成功，但未操作插件文件、配置或容器。63 项后端测试及新旧 bridge 前端交互检查通过。Chrome 调试未连接，本地预览服务已停止；不将模拟 DOM 测试描述为真实 Dashboard 验收。
+
+## 10. 多例图与随机参考图（0.3.0）
+
+`Portrait.references` 统一新 images 列表和旧 image；读取时对文件名去重且保留顺序，不设固定张数。Store.save_portrait 验证每张图路径后原子保存。移出操作不物理删除图片，避免破坏既有任务引用；没有图像条件的文生图不随机、也不上传例图。
+
+`Store.vision_image` 在线程中制作最长边 1536、JPEG quality=85 的看图副本。`analyze_images` 每批最多 4 张，调用共享 vision_provider，并将上批统一档案作为 previous_analysis 传入。所有批次完成才发布最终 result；每批成功持久化 processed。该方式覆盖全部图片，固定长度档案累积汇总，不能承诺任意张图片在一次上下文中无损保留细节。
+
+`start_analysis` 先用 Engine.exclusive 获得共享占用，再向 HTTP 返回任务 id。analysis_worker 绑定插件生命周期，使用初始化 future 区分受理失败与后台失败；忙碌/冷却时不创建新分析记录。terminate 取消并等待分析，释放共享 gate；initialize 将上次 running 记录标记为中断，不重放模型请求。单批仍受 120 秒 LLM 超时约束；不增加固定总图数或自动重试。
+
+网页多选逐文件调用已有 upload，保留部分成功结果。分析结果包含人格与例图快照；自动应用还需本地档案草稿未改变，否则只展示结果，由用户手动应用。参考图集合或人格不匹配时禁止应用；结果最终仍需用户保存画像。轮询不重建例图画廊，不覆盖未保存的追加/移出操作。
+
+生成阶段在 Engine.start 完成准入校验后用 secrets.choice 选一张，任务同时保存完整 portrait 和 reference_image。Engine.run 只上传选中的图；未知任务恢复仅查询原提交，不再次选择。旧任务缺少 reference_image 时仍兼容旧 image。
+
+本轮 79 项后端测试、新旧 bridge 前端交互测试、核心严格及入口适配层类型检查通过。验证单图迁移、150 个文件名无固定数量上限、全部图片分批汇总、失败/重载保护、原图不变、内置/自定义图随机快照和文本生图无上传。前端覆盖多图追加/移出、部分上传失败、进度及草稿/人格隔离。未调用真实视觉模型、未提交真实生图、未验证 NAS 运行或真实页面视觉；原有 ComfyUI 工作流文件无需修改。

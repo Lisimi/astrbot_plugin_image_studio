@@ -2,7 +2,8 @@ const $ = (id) => document.getElementById(id);
 const bridge = window.AstrBotPluginView || window.AstrBotPluginPage;
 let state = null;
 let formRevision = "";
-let portraitImage = "";
+let portraitImages = [];
+let pendingAnalysis = null;
 let previewToken = "";
 let busy = false;
 let poll = null;
@@ -45,14 +46,50 @@ async function loadPortrait() {
   $("prompt-preview").value = "";
   const id = $("persona").value;
   const portrait = state.portraits[id] || {};
-  portraitImage = portrait.image || "";
+  portraitImages = Array.isArray(portrait.images) ? [...portrait.images] : (portrait.image ? [portrait.image] : []);
   for (const field of ["appearance", "style", "habits"]) $(field).value = portrait[field] || "";
   $("mode").value = portrait.mode || "text2img";
   $("denoise").value = portrait.denoise ?? 0.55;
   $("auto").checked = portrait.auto === true;
-  $("empty-image").hidden = Boolean(portraitImage);
   $("create-persona").textContent = id ? `当前人格：${id}。画像变更后请先保存。` : "请先在“人格画像”中选择人格并保存画像。";
-  await imagePreview("portraits", portraitImage, $("portrait-preview"));
+  renderGallery();
+  renderAnalysis();
+}
+function clearPreview() { previewToken = ""; $("prompt-preview").value = ""; }
+function portraitDraft() { return JSON.stringify([$("persona").value,portraitImages,...["appearance","style","habits"].map((field) => $(field).value)]); }
+function renderGallery() {
+  $("portrait-gallery").replaceChildren();
+  $("empty-image").hidden = portraitImages.length > 0;
+  $("portrait-count").textContent = `共 ${portraitImages.length} 张例图；需要图生图时每次随机选一张。`;
+  for (const [index,name] of portraitImages.entries()) {
+    const card = document.createElement("figure");
+    const image = document.createElement("img"); image.alt = `参考图 ${index + 1}`; image.loading = "lazy";
+    const remove = document.createElement("button"); remove.textContent = `移出例图 ${index + 1}`;
+    remove.onclick = () => operation(async () => {
+      portraitImages = portraitImages.filter((item) => item !== name); clearPreview();
+      renderGallery(); renderAnalysis(); notice("已移出当前例图列表，请保存画像使其生效。");
+    });
+    card.append(image,remove); $("portrait-gallery").append(card);
+    imagePreview("portraits",name,image).catch(() => { image.alt = `参考图 ${index + 1} 读取失败`; image.hidden = false; });
+  }
+}
+function analysisMatches(job) { return job.persona_id === $("persona").value && JSON.stringify(job.images) === JSON.stringify(portraitImages); }
+function applyAnalysis(job) {
+  if (job.stage !== "completed" || !analysisMatches(job)) throw new Error("分析对应的人格或例图已变化，请重新分析当前例图。");
+  for (const field of ["appearance","style","habits"]) $(field).value = job.result[field];
+  clearPreview(); notice("全部例图分析已应用，请检查外观与画风后保存画像。");
+}
+function renderAnalysis() {
+  const job = state.analysis || {};
+  $("analysis-result").hidden = job.stage !== "completed";
+  $("apply-analysis").hidden = job.stage !== "completed" || !analysisMatches(job);
+  $("analysis-status").textContent = job.stage === "running" ? `正在分析 ${job.persona_id} 的全部例图：${job.processed}/${job.total} 张。可等待自动更新，失败不会修改原档案。` : job.stage === "completed" ? `${job.persona_id} 的 ${job.total} 张例图已分析完成。${analysisMatches(job) ? "可将结果应用到当前档案。" : "人格或例图列表不同时不会覆盖当前档案。"}` : job.error || "上传后统一分析全部例图；多图分批看完并累积汇总。";
+  if (job.stage === "completed") $("analysis-result").value = `固定外观：\n${job.result.appearance}\n\n固定画风：\n${job.result.style}\n\n服饰与习惯：\n${job.result.habits}`;
+  if (pendingAnalysis?.id === job.id && ["completed","failed"].includes(job.stage)) {
+    if (job.stage === "completed" && analysisMatches(job) && pendingAnalysis.draft === portraitDraft()) applyAnalysis(job);
+    else notice(job.stage === "failed" ? job.error : "全部例图已分析完成；当前编辑内容已变化，请查看结果并手动应用。", job.stage === "failed");
+    pendingAnalysis = null;
+  }
 }
 function taskStatus() {
   const active = state.task.active;
@@ -74,7 +111,7 @@ async function history() {
       download.onclick = () => operation(() => bridge.download("download", {folder:"outputs",name:job.file}, job.file)); card.append(download);
     }
     const details = document.createElement("details"); const title = document.createElement("summary"); title.textContent = "最终提示词与任务信息";
-    const text = document.createElement("pre"); text.textContent = [job.prompt,job.error,`任务 ID：${job.prompt_id || job.id}`].filter(Boolean).join("\n\n"); details.append(title,text); card.append(details);
+    const text = document.createElement("pre"); text.textContent = [job.prompt,job.error,job.reference_image ? `本次参考图：${job.reference_image}` : "",`任务 ID：${job.prompt_id || job.id}`].filter(Boolean).join("\n\n"); details.append(title,text); card.append(details);
     $("history-list").append(card);
   }
 }
@@ -92,6 +129,7 @@ async function refresh(full = false) {
     await loadPortrait();
   }
   taskStatus();
+  renderAnalysis();
   if (!$("history").hidden) await history();
 }
 function selected() { const id = $("persona").value; if (!id) throw new Error("请先选择人格"); return id; }
@@ -111,22 +149,33 @@ document.querySelectorAll("nav button").forEach((button) => {
 $("persona").onchange = () => operation(loadPortrait);
 $("refresh").onclick = () => operation(async () => { await refresh(false); notice("状态已刷新；编辑中的表单保留。"); });
 $("portrait-file").onchange = () => operation(async () => {
-  const file = $("portrait-file").files[0]; if (!file) return;
-  if (file.size > 20 * 1024 * 1024) throw new Error("图片须小于 20 MB");
-  const result = await bridge.upload("upload", file); portraitImage = result.image;
-  await imagePreview("portraits", portraitImage, $("portrait-preview")); $("empty-image").hidden = true;
-  notice("参考图已上传，请解析或编辑后保存画像。");
+  selected();
+  const files = [...$("portrait-file").files]; if (!files.length) return;
+  if (files.some((file) => file.size > 20 * 1024 * 1024)) throw new Error("每张图片须小于 20 MB");
+  let added = 0;
+  try {
+    for (const file of files) {
+      notice(`正在上传例图 ${added + 1}/${files.length}…`);
+      const result = await bridge.upload("upload", file);
+      if (!portraitImages.includes(result.image)) portraitImages.push(result.image);
+      added++;
+    }
+  } catch (error) { throw new Error(`已上传 ${added} 张，其余未完成：${error.message || String(error)}`); }
+  finally { $("portrait-file").value = ""; clearPreview(); renderGallery(); renderAnalysis(); }
+  notice(`已追加 ${added} 张例图，请统一分析或编辑后保存画像。`);
 });
 $("analyze").onclick = () => operation(async () => {
-  if (!portraitImage) throw new Error("请先上传参考图");
-  notice("正在解析画像…");
-  const result = await api("analyze", {persona_id:selected(),image:portraitImage});
-  for (const field of ["appearance","style","habits"]) $(field).value = result[field];
-  notice("解析完成，请检查外观与画风后保存。");
+  if (!portraitImages.length) throw new Error("请先上传至少一张参考图");
+  const draft = portraitDraft();
+  const result = await api("analyze", {persona_id:selected(),images:[...portraitImages]});
+  pendingAnalysis = {id:result.id,draft};
+  notice("全部例图分析已受理，页面会更新进度，可继续查看设置。");
+  await refresh(false);
 });
+$("apply-analysis").onclick = () => operation(async () => { applyAnalysis(state.analysis || {}); });
 $("save-portrait").onclick = () => operation(async () => {
   const id = selected();
-  const portrait = {persona_id:id,image:portraitImage,appearance:$("appearance").value,style:$("style").value,habits:$("habits").value,mode:$("mode").value,denoise:Number($("denoise").value),auto:$("auto").checked};
+  const portrait = {persona_id:id,images:[...portraitImages],appearance:$("appearance").value,style:$("style").value,habits:$("habits").value,mode:$("mode").value,denoise:Number($("denoise").value),auto:$("auto").checked};
   await api("portrait", {persona_id:id,portrait}); await refresh(false); notice("人格画像已保存并确认。");
   previewToken = ""; $("prompt-preview").value = "";
 });

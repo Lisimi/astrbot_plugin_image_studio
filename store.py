@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import base64
 import io
 import json
 import os
@@ -48,11 +49,19 @@ class Store:
         return Portrait.read(object_value(value))
 
     def save_portrait(self, portrait: Portrait) -> None:
-        if portrait.image:
-            self.path("portraits", portrait.image)
+        for name in portrait.references:
+            self.path("portraits", name)
         values = self.read("portraits.json")
         values[portrait.persona_id] = portrait.to_dict()
         self.write("portraits.json", values)
+
+    def vision_image(self, name: str) -> str:
+        """Bound each vision input without altering the stored reference."""
+        with Image.open(self.path("portraits", name)) as image:
+            image.thumbnail((1536, 1536))
+            buffer = io.BytesIO()
+            image.convert("RGB").save(buffer, "JPEG", quality=85)
+        return "data:image/jpeg;base64," + base64.b64encode(buffer.getvalue()).decode()
 
     def path(self, folder: str, name: str) -> Path:
         if folder not in ("portraits", "outputs") or not name or Path(name).name != name or "/" in name or "\\" in name:

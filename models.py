@@ -39,6 +39,20 @@ def number(value: object, low: float, high: float) -> float:
 NEGATIVE = "worst quality, low quality, score_1, score_2, score_3, artist name, lowres, jpeg, text, words, logo, cropped, bad composition, artifacts, bad proportions, inaccurate limb, bad anatomy, extra fingers, missing fingers, extra arms, extra legs, inaccurate eyes, watermark"
 
 
+def reference_images(values: Object) -> tuple[str, ...]:
+    if "images" in values:
+        raw = values["images"]
+        if not isinstance(raw, list):
+            raise ValueError("例图须为图片文件名列表")
+    else:
+        legacy = string(values.get("image", ""), 128)
+        raw = [legacy] if legacy else []
+    names = tuple(dict.fromkeys(string(item, 128) for item in raw))
+    if any(not name for name in names):
+        raise ValueError("例图文件名不能为空")
+    return names
+
+
 @dataclass(frozen=True)
 class Settings:
     comfy_url: str = "http://192.168.0.203:8188"
@@ -112,9 +126,17 @@ class Portrait:
     denoise: float = 0.55
     auto: bool = False
     persona_hash: str = ""
+    images: tuple[str, ...] = ()
+
+    @property
+    def references(self) -> tuple[str, ...]:
+        return self.images or ((self.image,) if self.image else ())
 
     def to_dict(self) -> Object:
-        return object_value(asdict(self))
+        values = object_value(asdict(self))
+        values["images"] = list(self.references)
+        values["image"] = self.references[0] if self.references else ""
+        return values
 
     @classmethod
     def read(cls, values: Object) -> Portrait:
@@ -129,8 +151,9 @@ class Portrait:
         auto = values.get("auto", False)
         if not isinstance(auto, bool):
             raise ValueError("自动开关须为布尔值")
-        return cls(persona_id, string(values.get("image", ""), 128),
+        images = reference_images(values)
+        return cls(persona_id, images[0] if images else "",
                    string(values.get("appearance", "")), string(values.get("style", "")),
                    string(values.get("habits", "")), mode,
                    number(values.get("denoise", 0.55), 0.05, 1), auto,
-                   string(values.get("persona_hash", ""), 64))
+                   string(values.get("persona_hash", ""), 64), images)

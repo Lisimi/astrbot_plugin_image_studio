@@ -1,6 +1,6 @@
 name: astrbot_plugin_image_studio
 display_name: 生图工作室
 desc: 基于人格画像和 LLM 提示词调用可配置的本地 ComfyUI API 工作流，提供网页管理与全局冷却。
-version: 0.2.1
+version: 0.3.0
 author: OWNER
 astrbot_version: ">=4.17.0"

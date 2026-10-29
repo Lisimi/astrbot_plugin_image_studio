@@ -18,17 +18,21 @@ const settings = Object.fromEntries(Object.entries(JSON.parse(await fs.readFile(
 let modelCalls = 0;
 let generationCalls = 0;
 let connectionFails = false;
+let uploaded = 0;
+let analyzed = 0;
 const graph = {p:{class_type:'CLIPTextEncode',inputs:{text:'original'}},s:{class_type:'KSampler',inputs:{steps:20,positive:['p',0]}},o:{class_type:'SaveImage',inputs:{images:['s',0]}}};
 const inspected = {name:'api/example.json',source:'api/example.json',url:settings.comfy_url,graph,fingerprint:'abc123',nodes:3,fields:[{node:'p',field:'text',label:'Positive text',type:'STRING',linked:false,value:'original',options:{},choices:[]},{node:'s',field:'steps',label:'Sampler steps',type:'INT',linked:false,value:20,options:{min:1,max:100},choices:[]}],outputs:[{id:'o',label:'SaveImage'}],suggested:{positive:['p','text'],output:'o'}};
-const state = { settings, revision:'r1', workflow:{}, workflow_revision:'w1', personas:[{id:'alice'},{id:'bob'}], providers:[{id:'local-vl',model:'vision'}], portraits:{alice:{appearance:'blue eyes',style:'watercolor',image:'',auto:true},bob:{appearance:'green eyes',style:'ink',image:''}}, task:{active:null,cooldown_until:0},history:{items:[]} };
+const state = { settings, revision:'r1', workflow:{}, workflow_revision:'w1', analysis:{}, personas:[{id:'alice'},{id:'bob'}], providers:[{id:'local-vl',model:'vision'}], portraits:{alice:{appearance:'blue eyes',style:'watercolor',image:'legacy.png',auto:true},bob:{appearance:'green eyes',style:'ink',images:['bob-1.png','bob-2.png']}}, task:{active:null,cooldown_until:0},history:{items:[]} };
 const bridge = {
   async ready() {},
-  async apiGet(action) { if (action === 'state') return structuredClone(state); throw new Error('unexpected GET'); },
+  async apiGet(action) { if (action === 'state') return structuredClone(state); if (action === 'thumbnail') return {url:'data:image/png;base64,test'}; throw new Error('unexpected GET'); },
+  async upload(action,file) { assert.equal(action,'upload'); if (file.fail) throw new Error('upload interrupted'); uploaded++; return {image:`uploaded-${uploaded}.png`}; },
   async apiPost(action, body) {
     if (action === 'settings') { assert.equal(body.revision, state.revision, 'stale form must not overwrite server changes'); state.settings = body.settings; state.revision = 'r2'; return {}; }
     if (action === 'portrait') { state.portraits[body.persona_id] = body.portrait; return {}; }
     if (action === 'preview') { modelCalls++; return {prompt:'a character in a sunlit garden'}; }
     if (action === 'generate') { generationCalls++; return {id:'test-generation'}; }
+    if (action === 'analyze') { analyzed++;state.analysis={id:`analysis-${analyzed}`,persona_id:body.persona_id,images:[...body.images],stage:'running',processed:0,total:body.images.length};return {id:state.analysis.id}; }
     if (action === 'connection') { if (connectionFails) throw new Error('offline'); return {system:{comfyui_version:'test'}}; }
     if (action === 'workflows') return {items:[{path:'api/example.json',modified:Date.now()}]};
     if (action === 'workflow-inspect') return structuredClone(inspected);
@@ -47,8 +51,38 @@ await settle();
 assert.match(el('notice').textContent, /已连接/);
 el('persona').value='alice'; await el('persona').onchange();
 assert.equal(el('appearance').value,'blue eyes');
+assert.equal(el('portrait-gallery').children.length,1,'legacy single image stays visible');
 el('persona').value='bob'; await el('persona').onchange();
 assert.equal(el('appearance').value,'green eyes');
+assert.equal(el('portrait-gallery').children.length,2);
+el('portrait-file').files=[{size:100,name:'one.png'},{size:100,name:'two.png'}];
+await el('portrait-file').onchange();
+assert.equal(el('portrait-gallery').children.length,4,'multi-select appends images');
+await el('portrait-gallery').children[0].children[1].onclick();
+assert.equal(el('portrait-gallery').children.length,3,'remove changes draft only');
+await el('analyze').onclick(); assert.match(el('analysis-status').textContent,/0\/3/);
+el('appearance').value='edited during analysis';
+state.analysis={...state.analysis,stage:'completed',processed:3,result:{appearance:'shared identity',style:'shared style',habits:'quiet'}};
+await tick(); await settle(); assert.equal(el('appearance').value,'edited during analysis');
+assert.equal(el('apply-analysis').hidden,false);
+await el('apply-analysis').onclick(); assert.equal(el('appearance').value,'shared identity');
+await el('save-portrait').onclick();
+assert.deepEqual([...state.portraits.bob.images],['bob-2.png','uploaded-1.png','uploaded-2.png']);
+await el('analyze').onclick();
+state.analysis={...state.analysis,stage:'completed',processed:3,result:{appearance:'updated identity',style:'ink',habits:'quiet'}};
+await tick(); await settle(); assert.equal(el('appearance').value,'updated identity','untouched draft receives completed analysis');
+el('portrait-file').files=[{size:100,name:'three.png'},{size:100,name:'broken.png',fail:true}];
+await el('portrait-file').onchange();
+assert.match(el('notice').textContent,/已上传 1 张/);
+assert.equal(el('portrait-gallery').children.length,4,'partial successful uploads remain available');
+el('persona').value='alice'; await el('persona').onchange();
+assert.equal(el('portrait-gallery').children.length,1,'references stay isolated by persona');
+await el('analyze').onclick();
+el('persona').value='bob'; await el('persona').onchange();
+state.analysis={...state.analysis,stage:'completed',processed:1,result:{appearance:'alice only',style:'watercolor',habits:'quiet'}};
+await tick(); await settle();
+assert.equal(el('appearance').value,'shared identity','analysis cannot overwrite another persona');
+assert.equal(el('apply-analysis').hidden,true);
 await tabs.find((tab) => tab.dataset.tab === 'create').onclick();
 assert.equal(el('create').hidden,false);
 el('idea').value='sitting by a window'; await el('preview').onclick();
@@ -79,4 +113,4 @@ await el('workflow-save').onclick(); assert.match(el('notice').textContent,/stal
 connectionFails=true; await el('connection').onclick(); assert.match(el('notice').textContent,/offline/);
 await el('workflow-save').onclick(); assert.match(el('notice').textContent,/先检测/);
 assert.equal(el('workflow-save').disabled,false);
-console.log(`Frontend checks passed (${bridgeName}): persona isolation, draft/revision safety, workflow discovery, dynamic fields, mapping, save, offline gate.`);
+console.log(`Frontend checks passed (${bridgeName}): multi-image append/remove, analysis progress and stale-draft protection, persona isolation, workflow and revision safety.`);
